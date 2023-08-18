@@ -3,6 +3,10 @@
 
 Scanner::Scanner(const std::vector<u8> &data) : data(data), read_index(0) { }
 
+auto Scanner::index() -> size_t {
+    return read_index;
+}
+
 void Scanner::seek(size_t index) {
     read_index = index;
 }

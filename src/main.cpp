@@ -3,361 +3,248 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <string>
+#include <string_view>
 #include <vector>
-#include <cstdint>
-
-//TODO: Make all the parse* functions take in a scanner and add a method for getting the offset from
-//the scanner. The functions don't actually need raw access to the data and they just seek to the offset
-//at the start anyways so adding the ability to get the offset so they can utilize when needed but
-//ultimately just passing in a scanner and seeking to an offset before-hand would be cleaner and save
-//on resources (a little) by not constructing a scanner every single time.
-
-//TODO: wchar_t is only 16-bit on Windows, so rewrite those parts that use it to some other, more platform
-//agnostic, way.
 
 
-struct File {
-    std::wstring name;
-    size_t offset;
-    size_t size;
+enum NCCHSection : u8 {
+    ROMFS = 1,
+    EXEFS = 2,
+    LOGO  = 4,
+    PLAIN = 8,
+    ALL   = 0xF
 };
 
-struct Directory {
-    std::wstring name;
-    std::vector<Directory> children;
-    std::vector<File> files;
+struct ProgramConfig {
+    u8 partitions = 0;
+    u8 sections = 0;
+    std::vector<std::string> files;
+    std::vector<std::string> dirs;
+    std::string file_path;
+    std::string dump_dir;
 };
 
-auto parseFileSystem(const std::vector<u8> &data, size_t dir_offset, size_t file_offset, size_t data_offset, size_t offset) -> Directory {
-    Scanner scanner(data);
-    DirectoryMetadata entry = parseDirectoryMetadata(data, dir_offset + offset);
-    Directory dir;
+auto getFileName(std::string_view path) -> std::string {
+    std::string str = std::string(path);
+    const size_t index_fwd = str.find_last_of('/');
+    const size_t index_bck = str.find_last_of('\\');
 
-    if(!entry.name.empty()) {
-        dir.name = (wchar_t*)entry.name.data();
-    } else {
-        dir.name = L"root";
-    }
-    
-    //Add children
-    if(entry.child_offset != 0xFFFFFFFF) {
-        u32 child_offset = dir_offset + entry.child_offset;
-        DirectoryMetadata child_entry = parseDirectoryMetadata(data, child_offset);
-        dir.children.push_back(parseFileSystem(data, dir_offset, file_offset, data_offset, entry.child_offset));
-
-        while(child_entry.sibling_offset != 0xFFFFFFFF) {
-            dir.children.push_back(parseFileSystem(data, dir_offset, file_offset, data_offset, child_entry.sibling_offset));
-            child_offset = dir_offset + child_entry.sibling_offset;
-            child_entry = parseDirectoryMetadata(data, child_offset);
-        }
+    //If there is no foward or back slash then the input string should be the file name
+    if(index_fwd == std::string::npos && index_bck == std::string::npos) {
+        return str;
     }
 
-
-    //Add files
-    if(entry.first_file_offset != 0xFFFFFFFF) {
-        u32 child_file_offset = file_offset + entry.first_file_offset;
-        FileMetadata file_entry = parseFileMetadata(data, child_file_offset);
-        dir.files.emplace_back(File{(wchar_t*)file_entry.name.data(), data_offset + file_entry.data_offset, file_entry.data_size});
-        // dumpFile(data, data_offset + file_entry.data_offset, file_entry.data_size, (wchar_t*)file_entry.name);
-
-        // printf("File '%ls' Info:\n", (wchar_t*)file_entry.name);
-        // printf("Parent Offset: %X\n", file_entry.parent_offset);
-        // printf("Sibling Offset: %X\n", file_entry.sibling_offset);
-        // printf("Data Offset: %zX\n", file_entry.data_offset);
-        // printf("Data Size: %zX\n", file_entry.data_size);
-        // printf("\n");
-
-        while(file_entry.sibling_offset != 0xFFFFFFFF) {
-            child_file_offset = file_offset + file_entry.sibling_offset;
-            file_entry = parseFileMetadata(data, child_file_offset);
-            dir.files.push_back(File{(wchar_t*)file_entry.name.data(), data_offset + file_entry.data_offset, file_entry.data_size});
-        }
-    }
-
-
-    return dir;
+    const size_t index_slash = index_fwd == std::string::npos ? index_bck : index_fwd;
+    return str.substr(index_slash + 1);
 }
 
-void printDirectory(const Directory &dir, int level = 0) {
-    if(level > 0) {
-        for(int i = 0; i < level - 1; i++) {
-            printf("|");
-        }
-
-        printf("-");
-    }
-    
-    printf("%ls\n", dir.name.c_str());
-
-    for(const auto &file : dir.files) {
-        for(int i = 0; i < level; i++) {
-            printf("|");
-        }
-
-        printf("*%ls\n", file.name.c_str());
-    }
-
-    for(const auto &child : dir.children) {
-        printDirectory(child, level + 1);
-    }
+void printHelpMessage(const char *name) {
+    printf("Usage: %s [options] <file>\n\n", getFileName(name).c_str());
+    printf(
+    "Options:\n"
+    "\t--help     Print this help message\n"
+    "\t--version  Print version information\n"
+    "\t-a    All, dump all partitions\n"
+    "\t-p N  Partition, dump partition N of an NCSD\n"
+    "\t-d N  Directory, dump the files in directory named N in the RomFS\n"
+    "\t-f N  File, dump the file named N in the RomFS\n"
+    "\t-s    Dump all parts of a partition\n"
+    "\t-r    Dump the RomFS\n"
+    "\t-e    Dump the ExeFS\n"
+    "\t-l    Dump the Logo section\n"
+    "\t-p    Dump the Plain Region\n"
+    );
 }
 
-void dumpFile(const std::vector<u8> &data, size_t offset, size_t size, const std::wstring &name) {
-    std::ofstream file(name, std::ios::binary);
+auto parseArgs(int argc, char *argv[]) -> ProgramConfig {
+    ProgramConfig config{};
 
-    if(!file.is_open()) {
-        printf("Failed to dump file %ls!\n", name.c_str());
-        return;
+    if(argc < 2) {
+        printf("Usage: %s [options] <file>\n\n", getFileName(argv[0]).c_str());
+        std::exit(-1);
     }
 
-    printf("File '%ls' Offset: %zX  Size: %zX\n", name.c_str(), offset, size);
-    // printf("File Size  : %zX\n", size);
+    for(int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if(arg[0] == '-') {
+            //Options
+            if(arg == "--help") {
+                printHelpMessage(argv[0]);
+                std::exit(0);
+            } else if(arg == "--version") {
+                printf("NCSD Tool, Copyright (c) Wycube 2023\n");
+                printf("Version 0.1\n");
+                std::exit(0);
+            }
 
-    file.write(reinterpret_cast<const char*>(&data[offset]), size);
+            if(arg == "-a") {
+                config.partitions |= 0xFF;
+            } else if(arg == "-p") {
+                if(i == argc - 1) {
+                    printf("Error: No argument provided to option '-p'!\n");
+                    std::exit(-1);
+                }
+
+                int num = -1;
+                try {
+                    num = std::stoi(argv[++i]);
+                } catch(const std::exception &e) {
+                    printf("Error: Invalid argument provided to '-p'!\n");
+                    std::exit(-1);
+                }
+
+                if(num >= 0 && num <= 7) {
+                    config.partitions |= 1 << num;
+                }
+            } else if(arg == "-d") {
+                if(i == argc - 1) {
+                    printf("Error: No argument provided to option '-d'!\n");
+                    std::exit(-1);
+                }
+
+                config.dirs.push_back(argv[++i]);
+            } else if(arg == "-f") {
+                if(i == argc - 1) {
+                    printf("Error: No argument provided to option '-f'!\n");
+                    std::exit(-1);
+                }
+
+                config.files.push_back(argv[++i]);
+            } else if(arg == "-s") {
+                config.sections |= ALL;
+            } else if(arg == "-r") {
+                config.sections |= ROMFS;
+            } else if(arg == "-e") {
+                config.sections |= EXEFS;
+            } else if(arg == "-l") {
+                config.sections |= LOGO;
+            } else if(arg == "-p") {
+                config.sections |= PLAIN;
+            } else {
+                printf("Warning: Unknown option '%s'\n", argv[i]);
+            }
+        } else {
+            //File path
+            if(!config.file_path.empty()) {
+                printf("Error: More than one file provided!\n");
+                std::exit(-1);
+            }
+
+            config.file_path = arg;
+            std::string dump_dir = getFileName(config.file_path);
+            config.dump_dir = dump_dir.substr(0, dump_dir.find_last_of('.'));
+        }
+    }
+
+    return config;
 }
 
-void dumpDirectory(const std::vector<u8> &data, const Directory &dir, std::wstring path) {
-    //Create directory
-    std::wstring new_path = path + L"/" + dir.name;
+void dumpDirectory(const Directory &dir, const std::vector<u8> &file_data, const std::u16string &parent_path) {
+    const std::u16string new_path = parent_path + dir.name + u'/';
     std::filesystem::create_directory(new_path);
 
-    //Add files to that directory
-    for(const auto &file : dir.files) {
-        dumpFile(data, file.offset, file.size, new_path + L"/" + file.name);
+    for(const auto &child : dir.children) {
+        dumpDirectory(child, file_data, new_path);
     }
 
-    //Recurse for children
-    for(const auto &child : dir.children) {
-        dumpDirectory(data, child, new_path);
+    for(const auto &file : dir.files) {
+        const std::filesystem::path file_path = new_path + file.name;
+        std::ofstream file_stream(file_path, std::ios::binary);
+
+        if(!file_stream.is_open()) {
+            printf("Failed to dump file '%s'\n", file_path.string().c_str());
+            continue;
+        }
+
+        file_stream.write(reinterpret_cast<const char*>(&file_data[file.offset]), file.size);
     }
 }
 
+void dump(const ProgramConfig &config, const NCCH &ncch, int partition = 0) {
+    std::string partition_dir = config.dump_dir + '/' + std::to_string(partition) + '/';
+    std::filesystem::create_directory(partition_dir);
+
+    //Dump ExeFS
+    if(config.sections & EXEFS && ncch.exefs.has_value()) {
+        std::string exefs_dir = partition_dir + "ExeFS/";
+        std::filesystem::create_directory(exefs_dir);
+
+        for(int i = 0; i < 10; i++) {
+            if(ncch.exefs->header.file_headers[i].size > 0) {
+                char name[9] = {0};
+                std::memcpy(name, ncch.exefs->header.file_headers[i].name, sizeof(ExeFSFileHeader::name));
+
+                std::ofstream file(exefs_dir + name, std::ios::binary);
+                file.write(reinterpret_cast<const char*>(ncch.exefs->file_data[i].data()), ncch.exefs->file_data[i].size());
+            }
+        }
+    }
+
+    //Dump Logo
+    if(config.sections & LOGO && ncch.logo.has_value()) {
+        std::ofstream file(partition_dir + "logo", std::ios::binary);
+        file.write(reinterpret_cast<const char*>(ncch.logo->data()), ncch.logo->size());
+    }
+
+    //Dump Plain Region
+    if(config.sections & PLAIN && ncch.plain_region.has_value()) {
+        std::ofstream file(partition_dir + "plain_region", std::ios::binary);
+        file.write(reinterpret_cast<const char*>(ncch.plain_region->data()), ncch.plain_region->size());
+    }
+
+    //Dump whole RomFS, or the specified files/directories
+    if(config.sections & ROMFS && ncch.romfs.has_value()) {
+        dumpDirectory(ncch.romfs->root, ncch.romfs->level3.file_data, std::u16string(partition_dir.begin(), partition_dir.end()));
+    } else if((!config.files.empty() || !config.dirs.empty()) && ncch.romfs.has_value()) {
+
+    }
+}
 
 int main(int argc, char *argv[]) {
-    if(argc < 2) {
-        printf("No file provided!\n");
+    ProgramConfig config = parseArgs(argc, argv);
+    if(config.file_path.empty()) {
+        printf("Error: No file path provided!\n");
         return -1;
     }
 
-    std::ifstream file(argv[1], std::ios::binary);
-
+    std::ifstream file(config.file_path, std::ios::binary);
     if(!file.is_open()) {
-        printf("Failed to open file!\n");
+        printf("Error: Failed to open file!\n");
         return -1;
     }
 
-    size_t size = std::filesystem::file_size(argv[1]);
+    size_t size = std::filesystem::file_size(config.file_path);
     std::vector<u8> data(size);
     file.read(reinterpret_cast<char*>(data.data()), size);
     file.close();
 
-    Scanner scanner(data);
+    //Determine if file is NCSD or an NCCH partition, or neither
+    u32 magic = data[0x100] | (data[0x101] << 8) | (data[0x102] << 16) | (data[0x103] << 24);
+    std::vector<NCCH> ncchs;
 
-    //Parse NCSD
-    NCSD ncsd = parseNCSD(data, 0);
-
-    printf("Successfully Parsed!\n");
-    printf("Magic: %c%c%c%c\n", ncsd.header.magic & 0xFF, ncsd.header.magic >> 8 & 0xFF, ncsd.header.magic >> 16 & 0xFF, ncsd.header.magic >> 24 & 0xFF);
-    printf("Size: %u\n", ncsd.header.size);
-    printf("Media ID: %zu\n", ncsd.header.media_id);
-    printf("FS Type: %zu\n", ncsd.header.fs_type);
-    printf("Crypt Type: %zu\n", ncsd.header.crypt_type);
-
-    printf("Partition Table:\n");
-    for(int i = 0; i < 8; i++) {
-        if(ncsd.partitions[i].has_value()) {
-            NCCHHeader &p_header = ncsd.partitions[i]->header;
-            printf(" %i:\n", i);
-            printf("  Offset: 0x%X\n", ncsd.header.partition_table[i][0] * 0x200);
-            printf("  Size  : 0x%X\n", ncsd.header.partition_table[i][1] * 0x200);
-            printf("  ExeFS Offset: 0x%X\n", p_header.exefs_offset * 0x200);
-            printf("  ExeFS Size  : 0x%X\n", p_header.exefs_size * 0x200);
-        }
+    //Create dump directory
+    if(config.sections != 0) {
+        std::filesystem::create_directory(config.dump_dir);
     }
+    
+    if(magic == 0x4453434E) {
+        printf("NCSD\n");
 
-    //Parse the NCCH Header at Partition 0
-    size_t p0_offset = ncsd.header.partition_table[0][0] * 0x200;
-    NCCH &p0 = *ncsd.partitions[0];
+        //Print some information about NCSD if necessary
+        NCSD ncsd = parseNCSD(data, 0);
 
-    printf("Logo Offset: %zX\n", p0_offset + p0.header.logo_offset * 0x200);
-    printf("Logo Size: %X\n", p0.header.logo_size * 0x200);
-
-    //scanner RomFS Header
-    size_t romfs_offset = p0_offset + p0.header.romfs_offset * 0x200;
-    RomFSHeader &romfs_header = p0.romfs.header;
-    printf("RomFS offset: %zX\n", p0_offset + p0.header.romfs_offset * 0x200);
-
-    //Magic should equal the string 'IVFC'
-    if(romfs_header.magic != 0x43465649) {
-        printf("RomFS magic does not match! Value: %08X\n", romfs_header.magic);
+        //Add all partitions specified by config
+        for(int i = 0; i < 8; i++) {
+            if(config.partitions & (1 << i) && ncsd.partitions[i].has_value()) {
+                dump(config, ncsd.partitions[i].value(), i);
+            }
+        }
+    } else if(magic == 0x4843434E) {
+        printf("NCCH\n");
+        dump(config, parseNCCH(data, 0));
+    } else {
+        printf("Error: File is neither an NCSD or NCCH!\n");
         return -1;
-    }
-
-    //Magic number should equal 0x10000
-    if(romfs_header.magic_num != 0x10000) {
-        printf("RomFS magic number does not match! Value: %08X\n", romfs_header.magic_num);
-        return -1;
-    }
-
-    // printf("Lvl1 Offset: %zX\n", romfs_header.lvl1_offset);
-    // printf("Lvl2 Offset: %zX\n", romfs_header.lvl2_offset);
-    // printf("Lvl3 Offset: %zX\n", romfs_header.lvl3_offset);
-
-    Level3Header lvl3_header = p0.romfs.level3.header;
-
-    // printf("Lvl3 : 0x%X\n", lvl3_header.header_length);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.dir_hash_offset);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.dir_hash_length);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.dir_meta_offset);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.dir_meta_length);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.file_hash_offset);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.file_hash_length);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.file_meta_offset);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.file_meta_length);
-    // printf("Lvl3 : 0x%X\n", lvl3_header.file_data_offset);
-
-    DirectoryMetadata dir_entry = parseDirectoryMetadata(data, romfs_offset + 0x1000 + lvl3_header.dir_meta_offset);
-
-    // printf("\n");
-    // printf("Parent Offset: %X\n", dir_entry.parent_offset);
-    // printf("Sibling Offset: %X\n", dir_entry.sibling_offset);
-    // printf("Child Offset: %X\n", dir_entry.child_offset);
-    // printf("First File Offset: %X\n", dir_entry.first_file_offset);
-    // printf("Same Hash Offset: %X\n", dir_entry.same_hash_offset);
-    // printf("Name Length: %u\n", dir_entry.name_length);
-    // printf("Root Dir Name: %ls\n", (wchar_t*)dir_entry.name);
-    // printf("\n");
-
-    DirectoryMetadata child_dir_entry = parseDirectoryMetadata(data, romfs_offset + 0x1000 + lvl3_header.dir_meta_offset + dir_entry.child_offset);
-
-    // printf("Child Directory:\n");
-    // printf("Parent Offset: %X\n", child_dir_entry.parent_offset);
-    // printf("Sibling Offset: %X\n", child_dir_entry.sibling_offset);
-    // printf("Child Offset: %X\n", child_dir_entry.child_offset);
-    // printf("First File Offset: %X\n", child_dir_entry.first_file_offset);
-    // printf("Same Hash Offset: %X\n", child_dir_entry.same_hash_offset);
-    // printf("Name Length: %u\n", child_dir_entry.name_length);
-    // printf("Dir Name: %ls\n", (wchar_t*)child_dir_entry.name.data());
-    // printf("\n");
-
-    // Directory root = parseFileSystem(data, romfs_offset + 0x1000 + lvl3_header.dir_meta_offset, romfs_offset + 0x1000 + lvl3_header.file_meta_offset, romfs_offset + 0x1000 + lvl3_header.file_data_offset, 0);
-    // dumpDirectory(data, root, L".");
-    // printDirectory(root);
-
-    // return 0;
-
-    //Parse ExeFS Header
-    const size_t exefs_offset = p0_offset + p0.header.exefs_offset * 0x200;
-    printf("ExeFS Header Offset: %zX\n", exefs_offset);
-    
-    // return 0;
-    
-    // ExeFSHeader exefs_header;
-    // scanner.seek(exefs_offset);
-
-    // //File Headers
-    // for(int i = 0; i < 10; i++) {
-    //     scanner.readBytes(exefs_header.file_headers[i].name, sizeof(FileHeader::name));
-    //     exefs_header.file_headers[i].offset = scanner.readInt<u32>();
-    //     exefs_header.file_headers[i].size = scanner.readInt<u32>();
-    // }
-
-    // //File Hashes
-    // for(int i = 0; i < 10; i++) {
-    //     scanner.readBytes(exefs_header.file_hashes[i], 32);
-    // }
-
-    // printf("Parsed ExeFS Header!\n");
-    
-    // printf("Files:\n");
-    // for(int i = 0; i < 10; i++) {
-    //     if(exefs_header.file_headers[i].offset != 0 || exefs_header.file_headers[i].size != 0) {
-    //         char name[9];
-    //         std::memcpy(name, exefs_header.file_headers[i].name, 8);
-    //         name[8] = '\0';
-
-    //         printf(" File %i: %s\n", i, name);
-    //         printf("  Offset: 0x%X\n", exefs_header.file_headers[i].offset);
-    //         printf("  Size  : 0x%X\n", exefs_header.file_headers[i].size);
-    //     }
-    // }
-
-    // const size_t graphics_offset_24 = exefs_offset + p0.exefs.header.file_headers[2].offset + 0x200 + 0x2040;
-    const size_t graphics_offset_24 = 0x2040;
-    // const size_t graphics_offset_48 = exefs_offset + p0.exefs.header.file_headers[2].offset + 0x200 + 0x24C0;
-    const size_t graphics_offset_48 = 0x24C0;
-
-    //PPM Stuff below
-    std::ofstream image24("28x28.ppm", std::ios::binary);
-    std::ofstream image48("48x48.ppm", std::ios::binary);
-
-    image24 << "P6\n";
-    image24 << "24 24\n";
-    image24 << "255\n";
-    
-    image48 << "P6\n";
-    image48 << "48 48\n";
-    image48 << "255\n";
-
-    for(int y = 0; y < 24; y++) {
-        for(int x = 0; x < 24; x++) {
-            int tilex = x / 8;
-            int tiley = y / 8;
-            // int tile = (tilex & 1) | ((tiley & 1) << 1) | ((tilex & 2) << 1) | ((tiley & 2) << 2);
-            int tile = tilex + tiley * 3;
-            // printf("X: %i, Y: %i, Tile: %i\n", tilex, tiley, tile);
-            // int x = (i & 1) | ((i & 4) >> 1) | ((i & 0x10) >> 2) | ((i & 0x40) >> 3) | ((i & 0x100) >> 4) | ((i & 0x400) >> 5);
-            // int y = ((i & 2) >> 1) | ((i & 8) >> 1) | ((i & 0x20) >> 2) | ((i & 0x80) >> 3) | ((i & 0x200) >> 4);
-            int _x = x % 8;
-            int _y = y % 8;
-            int i = (_x & 1) | ((_y & 1) << 1) | ((_x & 2) << 1) | ((_y & 2) << 2) | ((_x & 4) << 2) | ((_y & 4) << 3) | ((_x & 8) << 3) | ((_y & 8) << 4) | ((_x & 0x10) << 4) | ((_y & 0x10) << 5) | ((_x & 0x20) << 5) | ((_y & 0x20) << 6) | ((_x & 0x40) << 6) | ((_y & 0x40) << 7);
-            // printf("X: %i, Y: %i, I: %i\n", x, y, i);
-            // int i = x + y * 24;
-
-            u16 color = p0.exefs.file_data[2][graphics_offset_24 + tile * 0x80 + i * 2] | (p0.exefs.file_data[2][graphics_offset_24 + tile * 0x80 + i * 2 + 1] << 8);
-            u8 red = (color >> 11) & 0x1F;
-            red = static_cast<u8>((float)red * (255.0f / 31.0f));
-            u8 green = (color >> 5) & 0x3F;
-            green = static_cast<u8>((float)green * (255.0f / 63.0f));
-            u8 blue = color & 0x1F;
-            blue = static_cast<u8>((float)blue * (255.0f / 31.0f));
-
-            // printf("Red: %i, Green: %i, Blue: %i\n", red, green, blue);
-
-            image24.put(red);
-            image24.put(green);
-            image24.put(blue);
-        }
-    }
-
-    for(int y = 0; y < 48; y++) {
-        for(int x = 0; x < 48; x++) {
-            int tilex = x / 8;
-            int tiley = y / 8;
-            // int tile = (tilex & 1) | ((tiley & 1) << 1) | ((tilex & 2) << 1) | ((tiley & 2) << 2);
-            int tile = tilex + tiley * 6;
-            // printf("X: %i, Y: %i, Tile: %i\n", tilex, tiley, tile);
-            // int x = (i & 1) | ((i & 4) >> 1) | ((i & 0x10) >> 2) | ((i & 0x40) >> 3) | ((i & 0x100) >> 4) | ((i & 0x400) >> 5);
-            // int y = ((i & 2) >> 1) | ((i & 8) >> 1) | ((i & 0x20) >> 2) | ((i & 0x80) >> 3) | ((i & 0x200) >> 4);
-            int _x = x % 8;
-            int _y = y % 8;
-            int i = (_x & 1) | ((_y & 1) << 1) | ((_x & 2) << 1) | ((_y & 2) << 2) | ((_x & 4) << 2) | ((_y & 4) << 3) | ((_x & 8) << 3) | ((_y & 8) << 4) | ((_x & 0x10) << 4) | ((_y & 0x10) << 5) | ((_x & 0x20) << 5) | ((_y & 0x20) << 6) | ((_x & 0x40) << 6) | ((_y & 0x40) << 7);
-            // printf("X: %i, Y: %i, I: %i\n", x, y, i);
-            // int i = x + y * 24;
-
-            u16 color = p0.exefs.file_data[2][graphics_offset_48 + tile * 0x80 + i * 2] | (p0.exefs.file_data[2][graphics_offset_48 + tile * 0x80 + i * 2 + 1] << 8);
-            u8 red = (color >> 11) & 0x1F;
-            red = static_cast<u8>((float)red * (255.0f / 31.0f));
-            u8 green = (color >> 5) & 0x3F;
-            green = static_cast<u8>((float)green * (255.0f / 63.0f));
-            u8 blue = color & 0x1F;
-            blue = static_cast<u8>((float)blue * (255.0f / 31.0f));
-
-            // printf("Red: %i, Green: %i, Blue: %i\n", red, green, blue);
-
-            image48.put(red);
-            image48.put(green);
-            image48.put(blue);
-        }
     }
 }

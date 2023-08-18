@@ -1,1 +1,1 @@
-add_executable(main main.cpp Scanner.cpp ExeFS.cpp RomFS.cpp NCCH.cpp NCSD.cpp)
+add_executable(tool main.cpp Scanner.cpp ExeFS.cpp RomFS.cpp NCCH.cpp NCSD.cpp)

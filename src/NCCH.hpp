@@ -2,9 +2,7 @@
 
 #include "ExeFS.hpp"
 #include "RomFS.hpp"
-
-//TODO: Convert everything to bytes when parsing instead of keeping them in media units
-//TODO: Go through and figure out what is in media units and stuff, then comment about them
+#include <optional>
 
 
 struct NCCHHeader {
@@ -99,14 +97,13 @@ struct NCCHExtendedHeader {
     AccessControlInfo aci_limits;
 };
 
-//TODO: Use std::optional for optional parts (Exheader, Logo, Plain Region, ExeFS, RomFS)
 struct NCCH {
     NCCHHeader header;
-    NCCHExtendedHeader exheader;
-    std::vector<u8> logo;
-    std::vector<u8> plain_region;
-    ExeFS exefs;
-    RomFS romfs;
+    std::optional<NCCHExtendedHeader> exheader;
+    std::optional<std::vector<u8>> logo;
+    std::optional<std::vector<u8>> plain_region;
+    std::optional<ExeFS> exefs;
+    std::optional<RomFS> romfs;
 };
 
 auto parseNCCHHeader(const std::vector<u8> &data, size_t offset) -> NCCHHeader;

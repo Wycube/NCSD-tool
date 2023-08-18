@@ -1,5 +1,6 @@
 #include "RomFS.hpp"
 #include "Scanner.hpp"
+#include <memory>
 
 
 auto parseLevel3Header(const std::vector<u8> &data, size_t offset) -> Level3Header {
@@ -34,12 +35,11 @@ auto parseDirectoryMetadata(const std::vector<u8> &data, size_t offset) -> Direc
     entry.name_length = scanner.readInt<u32>();
 
     if(entry.name_length > 0) {
-        entry.name.reserve(entry.name_length / 2 + 1);
+        entry.name.reserve(entry.name_length / 2);
         
         for(int i = 0; i < entry.name_length / 2; i++) {
             entry.name.push_back(scanner.readInt<u16>());
         }
-        entry.name.push_back(0);
     }
 
     return entry;
@@ -58,12 +58,11 @@ auto parseFileMetadata(const std::vector<u8> &data, size_t offset) -> FileMetada
     entry.name_length = scanner.readInt<u32>();
 
     if(entry.name_length > 0) {
-        entry.name.reserve(entry.name_length / 2 + 1);
+        entry.name.reserve(entry.name_length / 2);
         
         for(int i = 0; i < entry.name_length / 2; i++) {
             entry.name.push_back(scanner.readInt<u16>());
         }
-        entry.name.push_back(0);
     }
 
     return entry;
@@ -84,6 +83,7 @@ auto parseLevel3(const std::vector<u8> &data, size_t offset) -> Level3 {
     }
 
     //Directory Metadata Table
+    scanner.seek(offset + lvl3.header.dir_meta_offset);
     size_t dir_entry_offset = lvl3.header.dir_meta_offset;
     while(dir_entry_offset < lvl3.header.file_hash_offset - 0x18) {
         lvl3.dir_table.push_back(parseDirectoryMetadata(data, offset + dir_entry_offset));
@@ -128,6 +128,46 @@ auto parseLevel3(const std::vector<u8> &data, size_t offset) -> Level3 {
     return lvl3;
 }
 
+auto parseDirectory(const std::vector<u8> &data, size_t dir_offset, size_t file_offset, size_t offset) -> Directory {
+    static_assert(sizeof(char16_t) == 2);
+    DirectoryMetadata entry = parseDirectoryMetadata(data, dir_offset + offset);
+    Directory dir;
+
+    if(!entry.name.empty()) {
+        dir.name = std::u16string(reinterpret_cast<const char16_t*>(entry.name.data()), entry.name.size());
+    } else {
+        dir.name = u"RomFS";
+    }
+    
+    //Add children directories
+    if(entry.child_offset != 0xFFFFFFFF) {
+        u32 child_offset = dir_offset + entry.child_offset;
+        DirectoryMetadata child_entry = parseDirectoryMetadata(data, child_offset);
+        dir.children.push_back(parseDirectory(data, dir_offset, file_offset, entry.child_offset));
+
+        while(child_entry.sibling_offset != 0xFFFFFFFF) {
+            dir.children.push_back(parseDirectory(data, dir_offset, file_offset, child_entry.sibling_offset));
+            child_offset = dir_offset + child_entry.sibling_offset;
+            child_entry = parseDirectoryMetadata(data, child_offset);
+        }
+    }
+
+    //Add files
+    if(entry.first_file_offset != 0xFFFFFFFF) {
+        u32 child_file_offset = file_offset + entry.first_file_offset;
+        FileMetadata file_entry = parseFileMetadata(data, child_file_offset);
+        dir.files.emplace_back(File{std::u16string(reinterpret_cast<const char16_t*>(file_entry.name.data()), file_entry.name.size()), file_entry.data_offset, file_entry.data_size});
+
+        while(file_entry.sibling_offset != 0xFFFFFFFF) {
+            child_file_offset = file_offset + file_entry.sibling_offset;
+            file_entry = parseFileMetadata(data, child_file_offset);
+            dir.files.emplace_back(File{std::u16string(reinterpret_cast<const char16_t*>(file_entry.name.data()), file_entry.name.size()), file_entry.data_offset, file_entry.data_size});
+        }
+    }
+
+    return dir;
+}
+
 auto parseRomFSHeader(const std::vector<u8> &data, size_t offset) -> RomFSHeader {
     Scanner scanner(data);
     RomFSHeader header;
@@ -169,7 +209,9 @@ auto parseRomFS(const std::vector<u8> &data, size_t offset) -> RomFS {
         std::exit(-1);
     }
 
+    size_t lvl3_offset = offset + 0x1000;
     romfs.level3 = parseLevel3(data, offset + 0x1000);
+    romfs.root = parseDirectory(data, lvl3_offset + romfs.level3.header.dir_meta_offset, lvl3_offset + romfs.level3.header.file_meta_offset, 0);
 
     return romfs;
 }

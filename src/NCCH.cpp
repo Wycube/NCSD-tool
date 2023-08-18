@@ -140,16 +140,16 @@ auto parseNCCH(const std::vector<u8> &data, size_t offset) -> NCCH {
 
     //Check for Logo
     if(ncch.header.logo_size > 0) {
-        ncch.logo.resize(ncch.header.logo_size * 0x200);
+        ncch.logo = std::vector<u8>(ncch.header.logo_size * 0x200);
         scanner.seek(offset + ncch.header.logo_offset * 0x200);
-        scanner.readBytes(ncch.logo.data(), ncch.header.logo_size * 0x200);
+        scanner.readBytes(ncch.logo->data(), ncch.header.logo_size * 0x200);
     }
 
     //Check for Plain Region
     if(ncch.header.plain_size > 0) {
-        ncch.plain_region.resize(ncch.header.plain_size * 0x200);
+        ncch.plain_region = std::vector<u8>(ncch.header.plain_size * 0x200);
         scanner.seek(offset + ncch.header.plain_offset * 0x200);
-        scanner.readBytes(ncch.plain_region.data(), ncch.header.plain_size * 0x200);
+        scanner.readBytes(ncch.plain_region->data(), ncch.header.plain_size * 0x200);
     }
 
     //Check for ExeFS
@@ -159,6 +159,7 @@ auto parseNCCH(const std::vector<u8> &data, size_t offset) -> NCCH {
 
     //Check for RomFS
     if(ncch.header.romfs_size > 0) {
+        scanner.seek(offset + ncch.header.romfs_offset * 0x200);
         ncch.romfs = parseRomFS(data, offset + ncch.header.romfs_offset * 0x200);
     }
 

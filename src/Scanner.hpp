@@ -9,6 +9,7 @@ public:
 
     explicit Scanner(const std::vector<u8> &data);
 
+    auto index() -> size_t;
     void seek(size_t index);
     void skip(size_t count);
     void readBytes(u8 *out, size_t count);    
