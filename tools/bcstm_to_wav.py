@@ -213,7 +213,7 @@ def main():
         # print(c, ":", len(samples[c]))
 
     num_samples = min([len(channel) for channel in samples])
-    wav_file_name = sys.argv[2] if len(sys.argv) > 2 else sys.argv[1].removesuffix(".bcwav") + ".wav"
+    wav_file_name = sys.argv[2] if len(sys.argv) > 2 else sys.argv[1].removesuffix(".bcstm") + ".wav"
     wav_info = audio.WavInfo(info_struct["channel_count"], info_struct["sample_rate"], 2, num_samples, samples)
     audio.write_wav(wav_info, wav_file_name)
 

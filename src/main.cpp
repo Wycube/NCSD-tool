@@ -9,10 +9,10 @@
 
 
 enum NCCHSection : u8 {
-    ROMFS = 1,
-    EXEFS = 2,
-    LOGO  = 4,
-    PLAIN = 8,
+    ROMFS = 0x1,
+    EXEFS = 0x2,
+    LOGO  = 0x4,
+    PLAIN = 0x8,
     ALL   = 0xF
 };
 
@@ -140,6 +140,18 @@ auto parseArgs(int argc, char *argv[]) -> ProgramConfig {
     return config;
 }
 
+void dumpFile(const File &file, const std::vector<u8> &file_data, const std::u16string &parent) {
+    const std::filesystem::path file_path = parent + file.name;
+    std::ofstream file_stream(file_path, std::ios::binary);
+
+    if(!file_stream.is_open()) {
+        printf("Failed to dump file '%s'\n", file_path.string().c_str());
+        return;
+    }
+
+    file_stream.write(reinterpret_cast<const char*>(&file_data[file.offset]), file.size);
+}
+
 void dumpDirectory(const Directory &dir, const std::vector<u8> &file_data, const std::u16string &parent_path) {
     const std::u16string new_path = parent_path + dir.name + u'/';
     std::filesystem::create_directory(new_path);
@@ -149,21 +161,51 @@ void dumpDirectory(const Directory &dir, const std::vector<u8> &file_data, const
     }
 
     for(const auto &file : dir.files) {
-        const std::filesystem::path file_path = new_path + file.name;
-        std::ofstream file_stream(file_path, std::ios::binary);
-
-        if(!file_stream.is_open()) {
-            printf("Failed to dump file '%s'\n", file_path.string().c_str());
-            continue;
-        }
-
-        file_stream.write(reinterpret_cast<const char*>(&file_data[file.offset]), file.size);
+        dumpFile(file, file_data, new_path);
     }
+}
+
+auto findFile(const Directory &search_dir, const std::u16string &search_path, const std::u16string &path) -> std::optional<const File*> {
+    std::u16string new_search_path = search_path + search_dir.name + u'/';
+
+    for(const auto &file : search_dir.files) {
+        if((new_search_path + file.name) == path) {
+            return {&file};
+        }
+    }
+
+    for(const auto &child : search_dir.children) {
+        std::optional<const File*> result = findFile(child, new_search_path, path);
+        if(result.has_value()) {
+            return result;
+        }
+    }
+
+    return {};
+}
+
+auto findDirectory(const Directory &search_dir, const std::u16string &search_path, const std::u16string &path) -> std::optional<const Directory*> {
+    std::u16string new_search_path = search_path + search_dir.name;
+
+    if(new_search_path == path) {
+        return {&search_dir};
+    }
+
+    new_search_path += u'/';
+
+    for(const auto &child : search_dir.children) {
+        std::optional<const Directory*> result = findDirectory(child, new_search_path, path);
+        if(result.has_value()) {
+            return result;
+        }
+    }
+
+    return {};
 }
 
 void dump(const ProgramConfig &config, const NCCH &ncch, int partition = 0) {
     std::string partition_dir = config.dump_dir + '/' + std::to_string(partition) + '/';
-    std::filesystem::create_directory(partition_dir);
+    std::filesystem::create_directories(partition_dir);
 
     //Dump ExeFS
     if(config.sections & EXEFS && ncch.exefs.has_value()) {
@@ -197,7 +239,26 @@ void dump(const ProgramConfig &config, const NCCH &ncch, int partition = 0) {
     if(config.sections & ROMFS && ncch.romfs.has_value()) {
         dumpDirectory(ncch.romfs->root, ncch.romfs->level3.file_data, std::u16string(partition_dir.begin(), partition_dir.end()));
     } else if((!config.files.empty() || !config.dirs.empty()) && ncch.romfs.has_value()) {
+        const std::string romfs_dir = partition_dir + "RomFS/";
+        for(const auto &file_path : config.files) {
+            std::string abs_file_path = std::string("RomFS/") + file_path;
+            std::optional<const File*> result = findFile(ncch.romfs->root, u"", std::u16string(abs_file_path.begin(), abs_file_path.end()));
+            if(result.has_value()) {
+                std::filesystem::path parent_dir = std::filesystem::path(romfs_dir + file_path).parent_path();
+                std::filesystem::create_directories(parent_dir);
+                dumpFile(*result.value(), ncch.romfs->level3.file_data, parent_dir.u16string() + u'/');
+            }
+        }
 
+        for(const auto &dir_path : config.dirs) {
+            std::string abs_dir_path = std::string("RomFS/") + dir_path;
+            std::optional<const Directory*> result = findDirectory(ncch.romfs->root, u"", std::u16string(abs_dir_path.begin(), abs_dir_path.end()));
+            if(result.has_value()) {
+                std::filesystem::path parent_dir = std::filesystem::path(romfs_dir + dir_path).parent_path();
+                std::filesystem::create_directories(parent_dir);
+                dumpDirectory(*result.value(), ncch.romfs->level3.file_data, parent_dir.u16string() + u'/');
+            }
+        }
     }
 }
 
