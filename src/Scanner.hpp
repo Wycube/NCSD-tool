@@ -2,6 +2,7 @@
 
 #include "Types.hpp"
 #include <vector>
+#include <cstring>
 
 
 class Scanner {

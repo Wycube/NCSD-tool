@@ -95,6 +95,7 @@ def main():
 
     # Track Info Reference Table
     if info_struct["track_table_id"] == 0x101 and info_struct["track_table_offset"] != 0xFFFFFFFF:
+        assert(False, "Tracks not implemented in BCSTM decoding!")
         track_ref_table_start = header_struct["info_offset"] + 8 + info_struct["track_table_offset"]
         parser.seek(track_ref_table_start)
         track_ref_count = parser.parse_value(ParseType(4))

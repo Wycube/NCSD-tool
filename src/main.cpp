@@ -1,5 +1,6 @@
 #include "NCSD.hpp"
 #include "Scanner.hpp"
+#include <fmt/format.h>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -17,6 +18,7 @@ enum NCCHSection : u8 {
 };
 
 struct ProgramConfig {
+    bool print = false;
     u8 partitions = 0;
     u8 sections = 0;
     std::vector<std::string> files;
@@ -45,15 +47,16 @@ void printHelpMessage(const char *name) {
     "Options:\n"
     "\t--help     Print this help message\n"
     "\t--version  Print version information\n"
-    "\t-a    All, dump all partitions\n"
-    "\t-p N  Partition, dump partition N of an NCSD\n"
-    "\t-d N  Directory, dump the files in directory named N in the RomFS\n"
-    "\t-f N  File, dump the file named N in the RomFS\n"
-    "\t-s    Dump all parts of a partition\n"
-    "\t-r    Dump the RomFS\n"
-    "\t-e    Dump the ExeFS\n"
-    "\t-l    Dump the Logo section\n"
-    "\t-p    Dump the Plain Region\n"
+    "\t--print    Print the RomFS filesystem of the partitions\n"
+    "\t-a         All, dump all partitions\n"
+    "\t-p N       Partition, dump partition N of an NCSD\n"
+    "\t-d N       Directory, dump the files in directory named N in the RomFS\n"
+    "\t-f N       File, dump the file named N in the RomFS\n"
+    "\t-s         Dump all parts of a partition\n"
+    "\t-r         Dump the RomFS\n"
+    "\t-e         Dump the ExeFS\n"
+    "\t-l         Dump the Logo section\n"
+    "\t-p         Dump the Plain Region\n"
     );
 }
 
@@ -78,7 +81,9 @@ auto parseArgs(int argc, char *argv[]) -> ProgramConfig {
                 std::exit(0);
             }
 
-            if(arg == "-a") {
+            if(arg == "--print") {
+                config.print = true;
+            } else if(arg == "-a") {
                 config.partitions |= 0xFF;
             } else if(arg == "-p") {
                 if(i == argc - 1) {
@@ -138,6 +143,27 @@ auto parseArgs(int argc, char *argv[]) -> ProgramConfig {
     }
 
     return config;
+}
+
+void printDirectory(const Directory &dir, int level = 0) {
+    if(level > 0) {
+        fmt::print("{:│>{}}", "├", level);
+    }
+    fmt::print("{}\n", std::string(dir.name.begin(), dir.name.end()));
+
+    for(const auto &child : dir.children) {
+        printDirectory(child, level + 1);
+    }
+
+    for(size_t i = 0; i < dir.files.size(); i++) {
+        if(i < dir.files.size() - 1) {
+            fmt::print("{:│>{}}", "├", level + 1);
+        } else {
+            fmt::print("{:│>{}}", "└", level + 1);
+        }
+
+        fmt::print("{}\n", std::string(dir.files[i].name.begin(), dir.files[i].name.end()));
+    }
 }
 
 void dumpFile(const File &file, const std::vector<u8> &file_data, const std::u16string &parent) {
@@ -298,12 +324,23 @@ int main(int argc, char *argv[]) {
         //Add all partitions specified by config
         for(int i = 0; i < 8; i++) {
             if(config.partitions & (1 << i) && ncsd.partitions[i].has_value()) {
+                if(config.print && ncsd.partitions[i]->romfs.has_value()) {
+                    printf("Partition %i:\n", i);
+                    printDirectory(ncsd.partitions[i]->romfs->root);
+                }
+
                 dump(config, ncsd.partitions[i].value(), i);
             }
         }
     } else if(magic == 0x4843434E) {
         printf("NCCH\n");
-        dump(config, parseNCCH(data, 0));
+        NCCH ncch = parseNCCH(data, 0);
+
+        if(config.print && ncch.romfs.has_value()) {
+            printDirectory(ncch.romfs->root);
+        }
+
+        dump(config, ncch);
     } else {
         printf("Error: File is neither an NCSD or NCCH!\n");
         return -1;
